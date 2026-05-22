@@ -46,7 +46,6 @@ class LaplaceNLLLoss(nn.Module):
                 target: torch.Tensor) -> torch.Tensor:
         loc, scale = pred.chunk(2, dim=-1)
         scale = scale.clone()
-        # print("scale",scale.shape,"loc",loc.shape)
         with torch.no_grad():
             scale.clamp_(min=self.eps)
         nll = torch.log(2 * scale) + torch.abs(target - loc) / scale
@@ -61,8 +60,6 @@ class LaplaceNLLLoss(nn.Module):
             raise ValueError('{} is not a valid value for reduction'.format(self.reduction))
 
 class GaussianNLLLoss(nn.Module):
-    """https://pytorch.org/docs/stable/generated/torch.nn.GaussianNLLLoss.html
-    """
     def __init__(self,
                  eps: float = 1e-6,
                  reduction: str = 'mean') -> None:
@@ -93,7 +90,6 @@ def grid_sample(input, grid, mode='bilinear', padding_mode='zeros', align_corner
     N, C, IH, IW = input.shape
     _, H, W, _ = grid.shape
 
-    # 1. 将 [-1, 1] 坐标映射到 [0, IW-1] 和 [0, IH-1]
     ix = grid[..., 0]
     iy = grid[..., 1]
 
@@ -104,17 +100,14 @@ def grid_sample(input, grid, mode='bilinear', padding_mode='zeros', align_corner
         ix = ((ix + 1) * IW - 1) / 2
         iy = ((iy + 1) * IH - 1) / 2
 
-    # 2. 获取四个邻近像素的坐标
     ix0 = torch.floor(ix).long()
     iy0 = torch.floor(iy).long()
     ix1 = ix0 + 1
     iy1 = iy0 + 1
 
-    # 3. 计算权重 (这些权重计算是可导的)
     dx = ix - ix0.float()
     dy = iy - iy0.float()
 
-    # 4. 边界处理与掩码 (针对 padding_mode='zeros')
     mask = (ix >= 0) & (ix <= IW - 1) & (iy >= 0) & (iy <= IH - 1)
     mask = mask.float().unsqueeze(1)  # [N, 1, H, W]
 
@@ -123,8 +116,6 @@ def grid_sample(input, grid, mode='bilinear', padding_mode='zeros', align_corner
     iy0 = torch.clamp(iy0, 0, IH - 1)
     iy1 = torch.clamp(iy1, 0, IH - 1)
 
-    # 5. 安全地获取像素值 (利用 reshape 和 gather)
-    # 将 input 展平为 [N, C, IH*IW]
     input_flat = input.view(N, C, -1)
 
     def get_val(x, y):
@@ -137,16 +128,13 @@ def grid_sample(input, grid, mode='bilinear', padding_mode='zeros', align_corner
     v01 = get_val(ix0, iy1)
     v11 = get_val(ix1, iy1)
 
-    # 6. 双线性插值融合
     wa = (1 - dx) * (1 - dy)
     wb = dx * (1 - dy)
     wc = (1 - dx) * dy
     wd = dx * dy
 
-    # 增加维度以对齐通道 C
     wa, wb, wc, wd = wa.unsqueeze(1), wb.unsqueeze(1), wc.unsqueeze(1), wd.unsqueeze(1)
     out = wa * v00 + wb * v10 + wc * v01 + wd * v11
-    # 应用 'zeros' 填充模式
     return out * mask
 
 # ─────────────────────────────────────────────────────────────
@@ -163,17 +151,14 @@ class IICEConv(nn.Module):
         self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size))
         self.bias = nn.Parameter(torch.zeros(out_channels))
 
-        # 1. 衰减底数 λ: (0, 1)
+        # λ: (0, 1)
         self.lambda_raw = nn.Parameter(torch.tensor(0.0))
 
-        # 2. 状态系数 α: smooth 在 [1, 2], burst > smooth 且总和 <= 2.0
         self.alpha_smooth_raw = nn.Parameter(torch.tensor(-1.0))
         self.alpha_diff_raw = nn.Parameter(torch.tensor(0.0))
 
-        # 3. 状态区分阈值 θ: 让网络自适应学习最佳边界 (保证为正数)
         self.state_threshold_raw = nn.Parameter(torch.tensor(0.5))
 
-        # 后处理层
         self.activation = nn.LeakyReLU(0.2)
         self.norm = nn.LayerNorm(out_channels)
         self.proj = nn.Linear(out_channels, out_channels)
@@ -188,11 +173,10 @@ class IICEConv(nn.Module):
         N, T, C = x.shape
         device = x.device
 
-        # --- 获取受到严格数学约束的超参数 ---
         lambda_base = torch.sigmoid(self.lambda_raw)
         alpha_smooth = 1.0 + torch.sigmoid(self.alpha_smooth_raw)
         alpha_burst = alpha_smooth + torch.sigmoid(self.alpha_diff_raw) * (2.0 - alpha_smooth)
-        # 保证阈值 θ_s 为正
+
         state_threshold = F.softplus(self.state_threshold_raw)
 
         deltas = torch.arange(-(self.kernel_size - 1), 1, device=device).float()
@@ -204,12 +188,11 @@ class IICEConv(nn.Module):
 
         normalized_weight = torch.sigmoid(self.weight)
         masked_weight = normalized_weight * combined_mask.view(1, 1, -1)
-        # [N, T, C] -> [N, C, T]，并行提取所有时间窗 [N, C, T, K]
+        # [N, T, C] -> [N, C, T]
         x_nct = x.permute(0, 2, 1)
         x_padded = F.pad(x_nct, (self.kernel_size - 1, 0))
         x_windows = x_padded.unfold(dimension=2, size=self.kernel_size, step=1)
 
-        # 计算所有时间步 alpha_t 与 gamma_t
         alpha_t = torch.ones(N, T, 1, device=device, dtype=x.dtype) * alpha_smooth
         gamma_t = torch.ones(N, T, 1, device=device, dtype=x.dtype)
         if T > 1:
@@ -222,16 +205,13 @@ class IICEConv(nn.Module):
             cos_sim = F.cosine_similarity(x[:, 1:, :], x[:, :-1, :], dim=-1, eps=1e-8).unsqueeze(-1)
             gamma_t[:, 1:, :] = (cos_sim + 1.0) / 2.0
 
-        # 并行构建衰减项 λ^(α_t * |τ|)，并作用于所有时间窗
         exponent = alpha_t * distances.view(1, 1, -1)
         decay_mask = torch.pow(lambda_base, exponent)
         x_windows_decayed = x_windows * decay_mask.unsqueeze(1)
 
-        # 卷积：Y_raw [N, T, out_C]
         Y_raw = torch.einsum('nctk,ock->nto', x_windows_decayed, masked_weight) + self.bias.view(1, 1, -1)
         Y = gamma_t * Y_raw
 
-        # 后处理映射
         h = self.activation(Y)
         h = self.norm(h)
         h = self.proj(h)
@@ -309,20 +289,18 @@ class GroupInteractionAware(nn.Module):
 
     def compute_group_stats_seq(self, pos_seq, vel_seq, adj_seq):
         N, T, _ = pos_seq.shape
-        # 1. 密度[T, N] -> [N, T, 1]
+        # [T, N] -> [N, T, 1]
         density = adj_seq.sum(dim=-1).transpose(0, 1).unsqueeze(-1) / (N + 1e-8)
 
-        # 2. 平均速度
         group_vel_sum = torch.bmm(adj_seq, vel_seq.transpose(0, 1))
         neighbor_counts = adj_seq.sum(dim=-1, keepdim=True) + 1e-8
         V_i = group_vel_sum / neighbor_counts  # [T, N, 2]
         V_i = V_i.transpose(0, 1)  # [N, T, 2]
         avg_speed = torch.norm(V_i, dim=-1, keepdim=True)  # [N, T, 1]
 
-        # 3. 运动趋势
         V_i_T = V_i.transpose(0, 1)  # [T, N, 2]
         v_j_T = vel_seq.transpose(0, 1)  # [T, N, 2]
-        # 计算余弦相似度并映射到 [0,1] -> [T, N, N]
+        # [T, N, N]
         sim_matrix = F.cosine_similarity(V_i_T.unsqueeze(2), v_j_T.unsqueeze(1), dim=-1, eps=1e-8)
         sim_matrix = (sim_matrix + 1.0) / 2.0
 
@@ -348,14 +326,13 @@ class GroupInteractionAware(nn.Module):
         device = obs_embed.device
         h_half = H // 2
 
-        # 提取全局池化后的自适应参数
         ada_params = self.mlp_ada(obs_embed.mean(dim=1))  # [N, 4]
         gamma0 = ada_params[:, 0:1]
         gamma1 = ada_params[:, 1:2]
         lambda_ = ada_params[:, 2:3]
         delta_ = ada_params[:, 3:4]
 
-        # GTF_T (时间因果):
+        # GTF_T
         feat_T_raw = obs_embed.mean(dim=-1).unsqueeze(1)  # [N, 1, T]
         feat_T = F.adaptive_avg_pool1d(feat_T_raw, h_half).squeeze(1)  # [N, h_half]
 
@@ -365,7 +342,7 @@ class GroupInteractionAware(nn.Module):
         gtf_T_raw = self._grid_sample_1d(feat_T.unsqueeze(1), adjusted_grid_T).squeeze(1)
         gtf_T = gamma0 * F.adaptive_avg_pool1d(gtf_T_raw.unsqueeze(1), h_half).squeeze(1)
 
-        # GTF_D (空间因果)
+        # GTF_D
         feat_D_raw = obs_embed.mean(dim=1).unsqueeze(1)  # [N, 1, H]
         feat_D = F.adaptive_avg_pool1d(feat_D_raw, h_half).squeeze(1)  # [N, h_half]
 
@@ -375,7 +352,6 @@ class GroupInteractionAware(nn.Module):
         gtf_D_raw = self._grid_sample_1d(feat_D.unsqueeze(1), adjusted_grid_D).squeeze(1)
         gtf_D = gamma0 * F.adaptive_avg_pool1d(gtf_D_raw.unsqueeze(1), h_half).squeeze(1)
 
-        # 交叉注意力融合
         gtf_attn_out, _ = self.gtf_attn(gtf_T.unsqueeze(1), gtf_D.unsqueeze(1), gtf_D.unsqueeze(1))
         gtf_attn_scalar = gtf_attn_out.norm(dim=-1) / (h_half ** 0.5)
         gtf_scalar = gtf_attn_scalar * gamma0
@@ -387,12 +363,11 @@ class GroupInteractionAware(nn.Module):
     def compute_lif_seq(self, micro_feat_seq, density_seq, dir_seq, lif_scale, lif_shift):
         delta_z = torch.norm(micro_feat_seq[:, 1:] - micro_feat_seq[:, :-1], dim=-1, keepdim=True)
 
-        # 密度变化率 Δρ: [N, T-1, 1]
+        # Δρ: [N, T-1, 1]
         density_t = density_seq[:, 1:]
         density_prev = density_seq[:, :-1]
         delta_density = (density_t - density_prev) / (density_prev.abs() + 1e-8)
 
-        # 运动趋势
         dir_t = dir_seq[:, 1:]
 
         lif_base = delta_z + delta_density + (1.0 - dir_t)
@@ -415,7 +390,6 @@ class GroupInteractionAware(nn.Module):
         e = torch.where(mask > 0, e, torch.full_like(e, -1e4))
         alpha = F.softmax(e, dim=-1) * adj.unsqueeze(0)  # [K, N, N]
 
-        # 消息聚合并拼接
         head_out = torch.einsum('kij,kjd->kid', alpha, h)  # [K, N, D_h]
         out = head_out.permute(1, 0, 2).reshape(N, self.num_heads * self.gat_head_dim)
         return self.gat_out_proj(out)
@@ -429,30 +403,26 @@ class GroupInteractionAware(nn.Module):
         obs_input = torch.cat([micro_feat_seq, group_stats_seq, pos_fe_seq], dim=-1)
         obs_embed = self.obs_embed(obs_input)
 
-        # 3. 从序列中提取全局因果因子 (GTF) [N, 1]
+        # GTF [N, 1]
         gtf, lambda_, delta_ = self.compute_gtf(obs_embed)
 
-        # 4. 提取所有时间步的 LIF 序列 [N, T-1, 1]
+        # LIF [N, T-1, 1]
         density_seq = group_stats_seq[:, :, 0:1]
         dir_seq = group_stats_seq[:, :, 2:3]
         lif_seq = self.compute_lif_seq(micro_feat_seq, density_seq, dir_seq, lambda_, delta_)
 
-        #动态拓扑演化
         h_input_seq = torch.cat([micro_feat_seq, pos_fe_seq, group_stats_seq], dim=-1)
         norm_feat_seq = F.normalize(h_input_seq[:, 1:], dim=-1)  # [N, T-1, D]
 
-        # 计算所有时间步的节点相似度矩阵 Sim_t
         sim_seq = torch.bmm(norm_feat_seq.transpose(0, 1), norm_feat_seq.transpose(0, 1).transpose(1, 2))
         sim_seq = (sim_seq + 1.0) / 2.0
 
         adj_t = adj_prev if adj_prev is not None else adj_raw_seq[0]
 
-        # 沿着时间步从 1 到 T-1 进行马尔科夫递推
         for t in range(T - 1):
             lif_t = lif_seq[:, t, :]  # [N, 1]
             sim_t = sim_seq[t]  # [N, N]
 
-            # gtf [N,1] 和 lif_t [N,1] 在矩阵乘法中作为行缩放器自然广播
             adj_new = gtf * adj_t + (1.0 - gtf) * torch.sigmoid(lif_t * sim_t)
             adj_new = adj_new * (adj_new >= eff_nei_thre).float()
             adj_new.fill_diagonal_(0)
@@ -499,7 +469,6 @@ class GroupFieldGenerator(nn.Module):
         dx = gx - gx0.float()
         dy = gy - gy0.float()
 
-        # 计算双线性插值权重 [N, 1]
         w00 = ((1 - dx) * (1 - dy)).unsqueeze(1)
         w10 = (dx * (1 - dy)).unsqueeze(1)
         w01 = ((1 - dx) * dy).unsqueeze(1)
@@ -569,7 +538,7 @@ class GroupFieldGenerator(nn.Module):
         G = self.grid_size
         input_grid = group_field.permute(2, 0, 1).unsqueeze(0)  # [1, D, G, G]
         sample_pos = positions.unsqueeze(0).unsqueeze(2) * 2.0 - 1.0  # [1, N, 1, 2]
-        # 行人位置感知的特征 [N, D]
+
         sampled_feat = grid_sample(input_grid, sample_pos, mode='bilinear', padding_mode='zeros', align_corners=True).squeeze().t()
         return fused_feat, group_field,sampled_feat
 
@@ -590,7 +559,6 @@ class GroupFieldGenerator(nn.Module):
             fused_feat = fused_feat * m
 
         return fused_feat, group_field, sampled_feat
-
 
 # ─────────────────────────────────────────────────────────────
 # 4. 显式社交力建模 (双向物理链路)
@@ -623,7 +591,6 @@ class ExplicitSocialForce(nn.Module):
             shift_left = torch.roll(field_var, shifts=-1, dims=1)
             shift_right = torch.roll(field_var, shifts=1, dims=1)
 
-            # 构建边界掩码
             mask_up = torch.ones_like(field_var)
             mask_up[-1, :] = 0
             mask_down = torch.ones_like(field_var)
@@ -633,15 +600,12 @@ class ExplicitSocialForce(nn.Module):
             mask_right = torch.ones_like(field_var)
             mask_right[:, 0] = 0
 
-            # 并行计算所有网格的邻居均值
             sum_neighbors = shift_up * mask_up + shift_down * mask_down + shift_left * mask_left + shift_right * mask_right
             count_neighbors = mask_up + mask_down + mask_left + mask_right
             neighbor_mean = sum_neighbors / count_neighbors
 
-            # 得到全图梯度矩阵 [G, G]
             grad_matrix = field_var - neighbor_mean
 
-            # 并行提取所有行人的梯度
             gx = torch.clamp((positions[:, 0] * (G - 1)).long(), 0, G - 1)
             gy = torch.clamp((positions[:, 1] * (G - 1)).long(), 0, G - 1)
 
@@ -790,13 +754,11 @@ class ImplicitSocialForce(nn.Module):
             field_energy.retain_grad()
         avg_dist = self.compute_distances(positions)  # [N, 1]
 
-        #灵敏度
         sensitivity = self.compute_social_sensitivity(adj_weights)  # [N, 1]
 
-        # 斥力
         f_rep = sensitivity * (1.0 / (field_energy + self.epsilon)) * \
                 torch.exp(-avg_dist ** 2 / self.safe_distance ** 2)
-        # 引力
+
         f_att = sensitivity * torch.sigmoid(field_energy) * \
                 (1.0 - torch.exp(-avg_dist ** 2 / self.safe_distance ** 2))
 
@@ -881,9 +843,8 @@ class CausalConstraintEnhancement(nn.Module):
         return torch.stack(grads_list_safe, dim=1)
 
     def implicit_social_constraint(self, social_force_list, sample_feat_list):
-        # 瞬时梯度项
         inst_grad = self._get_elementwise_grad_from_list(social_force_list, sample_feat_list)
-        # 势梯度项
+
         if len(sample_feat_list) > 0 and isinstance(sample_feat_list[0], (list, tuple)):
             sample_feat_seq_list = [torch.cat(sample_feat_list[t], dim=0) for t in range(len(sample_feat_list))]
             sample_feat_seq = torch.stack(sample_feat_seq_list, dim=1)
@@ -898,7 +859,6 @@ class CausalConstraintEnhancement(nn.Module):
         return loss
 
     def global_causal_constraint(self, fused_feat_list, macro_feat_list, social_force_list):
-        # --- 宏观部分 (Macro) ---
         inst_grad_m = self._get_elementwise_grad_from_list(fused_feat_list, macro_feat_list)
         if len(macro_feat_list) > 0 and isinstance(macro_feat_list[0], (list, tuple)):
             macro_feat_seq_list = [torch.cat(macro_feat_list[t], dim=0) for t in range(len(macro_feat_list))]
@@ -909,7 +869,6 @@ class CausalConstraintEnhancement(nn.Module):
         evo_grad_m[:, 1:] = macro_feat_seq[:, 1:] - macro_feat_seq[:, :-1]
         term_macro = inst_grad_m * evo_grad_m
 
-        # --- 社交部分 (Social Force) ---
         inst_grad_s = self._get_elementwise_grad_from_list(fused_feat_list, social_force_list)
         if len(social_force_list) > 0 and isinstance(social_force_list[0], (list, tuple)):
             social_force_seq_list = [torch.cat(social_force_list[t], dim=0) for t in range(len(social_force_list))]
@@ -1105,7 +1064,7 @@ class CaDSLTraj(nn.Module):
 
         obs_abs = batch_abs[:, :T_obs, :]
         pred_abs = batch_abs[:, T_obs:, :]
-        # 1. 微观因果序列
+
         vel_all = torch.zeros(N, T_obs, 2, device=device)
         vel_all[:, 1:] = obs_abs[:, 1:] - obs_abs[:, :-1]
         speed_all = vel_all.norm(dim=-1, keepdim=True)
@@ -1136,7 +1095,6 @@ class CaDSLTraj(nn.Module):
         for n in sorted(buckets.keys()):
             scene_items = buckets[n]
 
-            # 单人场景快速路径
             if n == 1:
                 for _, start, end in scene_items:
                     scene_micro_seq = micro_feat_seq_all[start:end]
@@ -1259,7 +1217,7 @@ class CaDSLTraj(nn.Module):
                     batch_adj_blocks.append(adj_updated)
                     for t in range(T_obs):
                         batch_implicit_force_per_t[t].append(implicit_force_list[t])
-                        # 用更新后的场替代原 group_field_seq。
+
                         batch_group_field_per_t[t].append(updated_group_field_seq[t])
                         batch_fused_feat_per_t[t].append(fused_feat_list[t])
                         batch_sample_feat_per_t[t].append(sample_feat_list[t])
