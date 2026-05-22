@@ -2,7 +2,7 @@ import argparse
 import ast
 
 def get_parser():
-    parser = argparse.ArgumentParser(description='PMIra')
+    parser = argparse.ArgumentParser(description='CaDSLTraj')
     parser.add_argument('--ifvalid',default=True,type=ast.literal_eval,help="=False,usell train set to train,"
                                                                             "=True,use train set to train and valid")
     parser.add_argument("--final_mode",default=20,type=int)
