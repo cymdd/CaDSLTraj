@@ -14,7 +14,7 @@ class MainCaDSL:
         self.dataloader_gt = Dataloader
         self.epoch = 0
 
-    # ── 模型保存/加载 ──────────────────────────────────────
+    # ── model save/load ──────────────────────────────────────
 
     def save_model(self, epoch):
         model_path = self.args.model_filepath + '/' + self.args.train_model + '_' + str(epoch) + '.pth'
@@ -55,7 +55,7 @@ class MainCaDSL:
             eta_min=self.args.eta_min
         )
 
-    # ── 输入数据准备 ────────────────────────────────────────
+    # ── data input ────────────────────────────────────────
 
     def get_inputsfw(self, batch, epoch, isval):
 
@@ -70,7 +70,7 @@ class MainCaDSL:
 
         batch_abs_gt, batch_norm_gt, shift_value_gt, seq_list_gt, nei_num = inputs_gt
 
-        # CaDSL-Traj 输入格式: [N, T, 2]
+        #[N, T, 2]
         if batch_abs_gt.dim() == 3 and batch_abs_gt.shape[0] != batch_abs_gt.shape[1]:
             if batch_abs_gt.shape[0] == self.args.seq_length:
                 batch_abs_gt = batch_abs_gt.permute(1, 0, 2)   # [N, T, 2]
@@ -79,7 +79,7 @@ class MainCaDSL:
         inputs_fw = batch_abs_gt, batch_norm_gt, nei_lists, nei_num, batch_split
         return inputs_fw, batch_norm_gt
 
-    # ── 测试 ────────────────────────────────────────────────
+    # ── test ────────────────────────────────────────────────
 
     def playtest(self):
         print('Testing begin')
@@ -97,14 +97,13 @@ class MainCaDSL:
         else:
             print("No model weight file!")
 
-    # ── 完整训练流程 ─────────────────────────────────────────
+    # ── train ─────────────────────────────────────────
 
     def playEntireTrain(self):
         torch.cuda.empty_cache()
         perf_dict = {"whole_model[ADE,FDE]": [1e3, 1e3]}
         dict_key = "whole_model[ADE,FDE]"
 
-        # 导入并实例化 CaDSL-Traj 模型
         from model import CaDSLTraj
         self.net = CaDSLTraj(self.args)
         self.set_optimizer()
@@ -155,7 +154,7 @@ class MainCaDSL:
         print(f'train_time = {(end - start) / 3600:.2f} H')
         epochs_tqdm.close()
 
-    # ── 训练 epoch ──────────────────────────────────────────
+    # ── train epoch ──────────────────────────────────────────
 
     def train_epoch(self, epoch):
         self.net.train()
@@ -181,7 +180,7 @@ class MainCaDSL:
 
         return loss_epoch / (self.dataloader_gt.trainbatchnums + 1e-8)
 
-    # ── 验证 epoch ──────────────────────────────────────────
+    # ── val epoch ──────────────────────────────────────────
 
     def val_epoch(self):
         self.net.eval()
@@ -197,8 +196,7 @@ class MainCaDSL:
                 inputs_gt = tuple([i.cuda() for i in inputs_gt])
 
             batch_abs_gt, batch_norm_gt, shift_value_gt, seq_list_gt, nei_num = inputs_gt
-            #
-            # # 维度转换 [T, N, 2] → [N, T, 2]
+            # [T, N, 2] → [N, T, 2]
             if batch_abs_gt.shape[0] == self.args.seq_length:
                 batch_abs_gt = batch_abs_gt.permute(1, 0, 2)
                 # batch_norm_gt = batch_norm_gt.permute(1, 0, 2)
@@ -223,7 +221,7 @@ class MainCaDSL:
         end = time.time()
         return error_epoch / error_cnt_epoch, final_error_epoch / final_error_cnt_epoch, first_erro_epoch / first_erro_cnt_epoch,end-start
 
-    # ── 测试 epoch ──────────────────────────────────────────
+    # ── test epoch ──────────────────────────────────────────
 
     def test_epoch(self):
         self.net.eval()
@@ -239,8 +237,7 @@ class MainCaDSL:
                 inputs_gt = tuple([i.cuda() for i in inputs_gt])
         
             batch_abs_gt, batch_norm_gt, shift_value_gt, seq_list_gt, nei_num = inputs_gt
-            #
-            # # 维度转换 [T, N, 2] → [N, T, 2]
+            #[T, N, 2] → [N, T, 2]
             if batch_abs_gt.shape[0] == self.args.seq_length:
                 batch_abs_gt = batch_abs_gt.permute(1, 0, 2)
                 # batch_norm_gt = batch_norm_gt.permute(1, 0, 2)
